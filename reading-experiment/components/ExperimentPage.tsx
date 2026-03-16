@@ -35,73 +35,31 @@ const SECTION_TITLES = Object.fromEntries(SECTIONS.map((s) => [s.id, s.title]));
 
 type Stage = "consent" | "experiment" | "complete";
 
-export default function ExperimentPage() {
-  const [stage, setStage] = useState<Stage>("consent");
-  const [participantId, setParticipantId] = useState("");
+// ─── Inner component: only mounts AFTER sections are in the DOM ───────────────
+// This is the key fix: useReadingTracker runs its effects here, so the
+// IntersectionObserver is always created after the section elements exist.
+function ReadingView({
+  participantId,
+  onFinish,
+}: {
+  participantId: string;
+  onFinish: (session: ReadingSession) => void;
+}) {
   const [showMetrics, setShowMetrics] = useState(true);
   const [session, setSession] = useState<ReadingSession | null>(null);
-  const [finalSession, setFinalSession] = useState<ReadingSession | null>(null);
-  const [submitStatus, setSubmitStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
-
-  const { getSnapshot, reset } = useReadingTracker(SECTION_IDS);
+  const { getSnapshot } = useReadingTracker(SECTION_IDS);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // Start polling once this component is mounted (sections are in the DOM)
   useEffect(() => {
-    if (stage !== "experiment") return;
     intervalRef.current = setInterval(() => setSession(getSnapshot()), 500);
     return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
-  }, [stage, getSnapshot]);
-
-  function handleConsent(pid: string) {
-    setParticipantId(pid);
-    reset();
-    setStage("experiment");
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  }
+  }, [getSnapshot]);
 
   const handleFinish = useCallback(async () => {
     if (intervalRef.current) clearInterval(intervalRef.current);
-    const snap = getSnapshot();
-    const payload = { ...snap, participantId };
-    setFinalSession(payload);
-    setSubmitStatus("saving");
-    setStage("complete");
-    window.scrollTo({ top: 0, behavior: "smooth" });
-
-    try {
-      const res = await fetch("/api/sessions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      setSubmitStatus(res.ok ? "saved" : "error");
-    } catch {
-      setSubmitStatus("error");
-    }
-  }, [getSnapshot, participantId]);
-
-  function handleRestart() {
-    reset();
-    setSession(null);
-    setFinalSession(null);
-    setSubmitStatus("idle");
-    setParticipantId("");
-    setStage("consent");
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  }
-
-  if (stage === "consent") return <ConsentScreen onConsent={handleConsent} />;
-
-  if (stage === "complete" && finalSession) {
-    return (
-      <CompletionScreen
-        session={finalSession}
-        participantId={participantId}
-        submitStatus={submitStatus}
-        onRestart={handleRestart}
-      />
-    );
-  }
+    onFinish(getSnapshot());
+  }, [getSnapshot, onFinish]);
 
   return (
     <div className="page-root">
@@ -156,4 +114,61 @@ export default function ExperimentPage() {
       </main>
     </div>
   );
+}
+
+// ─── Outer shell: manages stage transitions only ──────────────────────────────
+export default function ExperimentPage() {
+  const [stage, setStage] = useState<Stage>("consent");
+  const [participantId, setParticipantId] = useState("");
+  const [finalSession, setFinalSession] = useState<ReadingSession | null>(null);
+  const [submitStatus, setSubmitStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+
+  function handleConsent(pid: string) {
+    setParticipantId(pid);
+    setStage("experiment");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  const handleFinish = useCallback(async (snap: ReadingSession) => {
+    const payload = { ...snap, participantId };
+    setFinalSession(payload);
+    setSubmitStatus("saving");
+    setStage("complete");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+
+    try {
+      const res = await fetch("/api/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      setSubmitStatus(res.ok ? "saved" : "error");
+    } catch {
+      setSubmitStatus("error");
+    }
+  }, [participantId]);
+
+  function handleRestart() {
+    setFinalSession(null);
+    setSubmitStatus("idle");
+    setParticipantId("");
+    setStage("consent");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  if (stage === "consent") return <ConsentScreen onConsent={handleConsent} />;
+
+  if (stage === "complete" && finalSession) {
+    return (
+      <CompletionScreen
+        session={finalSession}
+        participantId={participantId}
+        submitStatus={submitStatus}
+        onRestart={handleRestart}
+      />
+    );
+  }
+
+  // ReadingView mounts here — sections are in the DOM when the tracker hook runs
+  return <ReadingView participantId={participantId} onFinish={handleFinish} />;
 }

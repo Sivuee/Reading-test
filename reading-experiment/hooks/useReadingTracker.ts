@@ -41,24 +41,7 @@ function initSection(sectionId: string): SectionMetrics {
 export function useReadingTracker(sectionIds: string[]) {
   const sessionRef = useRef<ReadingSession>(createSession());
   const activeTimersRef = useRef<Record<string, number>>({});
-  const observerRef = useRef<IntersectionObserver | null>(null);
   const visibleSectionsRef = useRef<Set<string>>(new Set());
-
-  // Keep a stable ref to sectionIds so effects don't re-run on every render
-  const sectionIdsRef = useRef<string[]>(sectionIds);
-  useEffect(() => {
-    sectionIdsRef.current = sectionIds;
-  });
-
-  // Initialise section records
-  useEffect(() => {
-    sectionIds.forEach((id) => {
-      if (!sessionRef.current.sections[id]) {
-        sessionRef.current.sections[id] = initSection(id);
-      }
-    });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // intentionally only on mount
 
   const startTimer = useCallback((sectionId: string) => {
     if (activeTimersRef.current[sectionId]) return;
@@ -82,88 +65,65 @@ export function useReadingTracker(sectionIds: string[]) {
     }
   }, []);
 
-  // Set up IntersectionObserver after the DOM has painted
+  // Set up IntersectionObserver. This hook is only ever called from ReadingView,
+  // which mounts *after* all section elements are already in the DOM, so
+  // querySelector will find them immediately on first run.
   useEffect(() => {
-    const thresholds = Array.from({ length: 21 }, (_, i) => i / 20);
+    // Initialise section records
+    sectionIds.forEach((id) => {
+      if (!sessionRef.current.sections[id]) {
+        sessionRef.current.sections[id] = initSection(id);
+      }
+    });
 
-    const attachObserver = () => {
-      // Disconnect any previous observer
-      observerRef.current?.disconnect();
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          const id = entry.target.getAttribute("data-section-id");
+          if (!id) return;
+          if (!sessionRef.current.sections[id]) {
+            sessionRef.current.sections[id] = initSection(id);
+          }
+          const section = sessionRef.current.sections[id];
+          if (entry.isIntersecting) {
+            visibleSectionsRef.current.add(id);
+            startTimer(id);
+            section.maxScrollDepth = Math.max(section.maxScrollDepth, entry.intersectionRatio);
+          } else {
+            visibleSectionsRef.current.delete(id);
+            stopTimer(id);
+          }
+        });
+      },
+      { threshold: Array.from({ length: 21 }, (_, i) => i / 20) }
+    );
 
-      observerRef.current = new IntersectionObserver(
-        (entries) => {
-          entries.forEach((entry) => {
-            const id = entry.target.getAttribute("data-section-id");
-            if (!id) return;
+    sectionIds.forEach((id) => {
+      const el = document.querySelector(`[data-section-id="${id}"]`);
+      if (el) observer.observe(el);
+    });
 
-            if (!sessionRef.current.sections[id]) {
-              sessionRef.current.sections[id] = initSection(id);
-            }
-
-            const section = sessionRef.current.sections[id];
-
-            if (entry.isIntersecting) {
-              visibleSectionsRef.current.add(id);
-              startTimer(id);
-              section.maxScrollDepth = Math.max(
-                section.maxScrollDepth,
-                entry.intersectionRatio
-              );
-            } else {
-              visibleSectionsRef.current.delete(id);
-              stopTimer(id);
-            }
-          });
-        },
-        { threshold: thresholds }
-      );
-
-      let attached = 0;
-      sectionIdsRef.current.forEach((id) => {
-        const el = document.querySelector(`[data-section-id="${id}"]`);
-        if (el) {
-          observerRef.current!.observe(el);
-          attached++;
-        }
-      });
-      return attached;
-    };
-
-    // Try immediately, then retry with rAF in case elements aren't painted yet
-    const immediate = attachObserver();
-    if (immediate < sectionIdsRef.current.length) {
-      const raf = requestAnimationFrame(() => attachObserver());
-      return () => {
-        cancelAnimationFrame(raf);
-        observerRef.current?.disconnect();
-      };
-    }
-
-    return () => observerRef.current?.disconnect();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // run once on mount only
+    return () => observer.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // run once on mount — sections are guaranteed to exist at this point
 
   // Mouse movement tracker
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       sessionRef.current.totalMouseMovements += 1;
-
       visibleSectionsRef.current.forEach((id) => {
         const el = document.querySelector(`[data-section-id="${id}"]`);
         if (!el) return;
         const rect = el.getBoundingClientRect();
         if (
-          e.clientX >= rect.left &&
-          e.clientX <= rect.right &&
-          e.clientY >= rect.top &&
-          e.clientY <= rect.bottom
+          e.clientX >= rect.left && e.clientX <= rect.right &&
+          e.clientY >= rect.top  && e.clientY <= rect.bottom
         ) {
           const section = sessionRef.current.sections[id];
           if (section) section.mouseMovements += 1;
         }
       });
     };
-
     window.addEventListener("mousemove", handleMouseMove, { passive: true });
     return () => window.removeEventListener("mousemove", handleMouseMove);
   }, []);
@@ -171,13 +131,10 @@ export function useReadingTracker(sectionIds: string[]) {
   // Flush timers when tab is hidden
   useEffect(() => {
     const handleVisibilityChange = () => {
-      if (document.hidden) {
-        visibleSectionsRef.current.forEach((id) => stopTimer(id));
-      }
+      if (document.hidden) visibleSectionsRef.current.forEach(stopTimer);
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
-    return () =>
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
   }, [stopTimer]);
 
   const getSnapshot = useCallback((): ReadingSession => {
@@ -192,12 +149,12 @@ export function useReadingTracker(sectionIds: string[]) {
   }, []);
 
   const reset = useCallback(() => {
-    visibleSectionsRef.current.forEach((id) => stopTimer(id));
+    visibleSectionsRef.current.forEach(stopTimer);
     sessionRef.current = createSession();
-    sectionIdsRef.current.forEach((id) => {
+    sectionIds.forEach((id) => {
       sessionRef.current.sections[id] = initSection(id);
     });
-  }, [stopTimer]);
+  }, [sectionIds, stopTimer]);
 
   return { getSnapshot, reset };
 }
